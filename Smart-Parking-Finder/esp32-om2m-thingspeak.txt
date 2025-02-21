@@ -1,0 +1,122 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+
+// WiFi credentials
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+// ThingSpeak settings
+const char* thingspeakApiKey = "YOUR_THINGSPEAK_API_KEY";
+const char* thingspeakServer = "api.thingspeak.com";
+
+// OM2M settings
+const char* om2mServer = "YOUR_OM2M_SERVER"; // e.g., "http://192.168.1.100:8080"
+const char* om2mAE = "YOUR_AE_NAME";
+const char* om2mContainer = "YOUR_CONTAINER_NAME";
+const char* om2mAuth = "admin:admin"; // Default credentials, change if needed
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+}
+
+String getOM2MData() {
+  String payload = "";
+  if(WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    
+    // Create URL for latest content instance
+    String url = String(om2mServer) + "/~/in-cse/in-name/" + 
+                 String(om2mAE) + "/" + String(om2mContainer) + "/la";
+    
+    http.begin(url);
+    
+    // Set headers
+    http.addHeader("Accept", "application/json");
+    http.addHeader("X-M2M-Origin", om2mAuth);
+    
+    // Send GET request
+    int httpResponseCode = http.GET();
+    
+    if(httpResponseCode > 0) {
+      Serial.printf("OM2M Response: %d\n", httpResponseCode);
+      payload = http.getString();
+      Serial.println("Data: " + payload);
+    } else {
+      Serial.printf("OM2M Error: %d\n", httpResponseCode);
+    }
+    
+    http.end();
+  }
+  return payload;
+}
+
+void publishToThingSpeak(JsonObject sensorData) {
+  if(WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    
+    // Prepare ThingSpeak URL with data
+    String url = "http://" + String(thingspeakServer) + "/update?api_key=" + String(thingspeakApiKey);
+    
+    // Add sensor readings to URL (up to 8 fields supported by ThingSpeak)
+    int fieldCount = 1;
+    for(JsonPair kv : sensorData) {
+      if(fieldCount <= 8) { // ThingSpeak supports max 8 fields
+        url += "&field" + String(fieldCount) + "=" + String(kv.value().as<float>());
+        fieldCount++;
+      }
+    }
+    
+    http.begin(url);
+    int httpResponseCode = http.GET();
+    
+    if(httpResponseCode > 0) {
+      Serial.printf("ThingSpeak Response: %d\n", httpResponseCode);
+    } else {
+      Serial.printf("ThingSpeak Error: %d\n", httpResponseCode);
+    }
+    
+    http.end();
+  }
+}
+
+void loop() {
+  // Get data from OM2M
+  String om2mData = getOM2MData();
+  
+  if(om2mData.length() > 0) {
+    // Parse OM2M response
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, om2mData);
+    
+    if(!error) {
+      // Extract the actual sensor data from OM2M response
+      // Assuming the data is in the format: {"m2m:cin": {"con": "{\"sensor1\":value1,\"sensor2\":value2,...}"}}
+      String sensorContent = doc["m2m:cin"]["con"].as<String>();
+      
+      // Parse the sensor content
+      StaticJsonDocument<512> sensorDoc;
+      error = deserializeJson(sensorDoc, sensorContent);
+      
+      if(!error) {
+        // Send to ThingSpeak
+        publishToThingSpeak(sensorDoc.as<JsonObject>());
+      } else {
+        Serial.println("Error parsing sensor data JSON");
+      }
+    } else {
+      Serial.println("Error parsing OM2M response");
+    }
+  }
+  
+  // Wait before next reading (15 seconds)
+  delay(15000);
+}
